@@ -7,38 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.0b3] - 2026-10-10
-
-Third beta of 0.9.0, from two more reports in
-[#8](https://github.com/antitoine/ha-solem-irrigation/issues/8): a wired on/off
-rain sensor, and an LR-MS rain gauge watched through two threshold trips and
-the OFF they triggered running out. To install it, enable **Show beta
-versions** in HACS.
+## [0.9.0] - 2026-10-11
 
 ### Added
 
+- **Rain gauge support.** A SOLEM tipping-bucket rain gauge (pluviomètre — e.g.
+  the one on an LR-MS sensor module) now gets its own device, with a
+  *&lt;gauge&gt; rainfall* sensor — SOLEM's lifetime total in mm, ready for
+  long-term statistics and a `utility_meter` — and a *&lt;gauge&gt; rain
+  threshold* binary sensor carrying SOLEM's own "beyond thresholds" flag as-is.
+  Identified by SOLEM's own input type (14), as listed in its web app; the
+  scaling is the per-gauge expression SOLEM ships.
+  ([#8](https://github.com/antitoine/ha-solem-irrigation/issues/8))
+
+  The binary sensor's attributes carry the threshold set in MySOLEM, the action
+  it triggers (*threshold_action*: *No action*, *Off for 1 day*, *Off for 2
+  days* or *Off for 3 days*, as matched against the MySOLEM screen by the #8
+  reporter; any other code is shown raw) and when it last fired
+  (*last_threshold_alert*). The flag latches: on a real LR-MS it stayed on for
+  days after the OFF it triggered had expired, so it records that the threshold
+  was crossed, not that watering is held — the controllers' *Irrigation
+  enabled* and *Rain delay* say that.
 - **On/off rain sensors.** A rain sensor wired to a controller's sensor input
   (capteur de pluie, e.g. a dry-contact Rain Bird RSD on an LR-IP-ECO) now gets
   a binary sensor named after it in MySOLEM: *wet* while the sensor reports
   rain, *dry* once it has dried out, read from the 0/1 that MySOLEM plots for
   it. Identified by SOLEM's own input type (2), which the integration used to
   ignore. ([#8](https://github.com/antitoine/ha-solem-irrigation/issues/8))
-
-### Changed
-
-- **Two more rain threshold actions are named**: *Off for 2 days* and *Off for
-  3 days* (codes 7 and 8, matched against the MySOLEM screen by the #8
-  reporter).
-- **The *rain threshold* binary sensor is documented for what it is.** On a
-  real LR-MS it stayed on for days after the OFF it triggered had expired, so
-  it records that the threshold was crossed, not that watering is held; the
-  controllers' *Irrigation enabled* and *Rain delay* say that.
-
-## [0.9.0b2] - 2026-10-07
-
-Second beta of 0.9.0, shaped by the first real LR-MS rain gauge report in
-[#8](https://github.com/antitoine/ha-solem-irrigation/issues/8). To install it,
-enable **Show beta versions** in HACS.
+- **Leftover devices can be deleted.** A replaced gateway or controller is a
+  new module, so its old device used to linger forever with every entity
+  *unavailable*, and Home Assistant offered no way to remove it. Any device the
+  integration no longer exposes can now be deleted, even if the old module is
+  still listed in MySOLEM; one still exposed is refused, as it would only come
+  back.
+- **Diagnostics now include each sensor's recent readings.** For every
+  configured input — modelled or not — the dump carries its newest raw tick, up
+  to 60 scaled ticks from the last 24 hours plus the window's first one (so a
+  cumulative sensor's daily total can be checked against MySOLEM's), and any
+  flag that changed since setup. The module page holds no readings at all, so
+  for a sensor the integration does not model yet (such as the LR-IP-ECO's
+  turbine flow meter,
+  [#12](https://github.com/antitoine/ha-solem-irrigation/issues/12)), this is
+  what reveals its scale and behaviour.
 
 ### Changed
 
@@ -58,53 +68,6 @@ enable **Show beta versions** in HACS.
   automation still referring to them must be updated. The startup warning
   naming them stays.
   ([#11](https://github.com/antitoine/ha-solem-irrigation/issues/11))
-- **The rain threshold's action is named.** Its *threshold_action* attribute
-  now reads *No action* or *Off for 1 day* instead of SOLEM's raw code (0 and 6,
-  as matched against the MySOLEM screen by the #8 reporter); any other code is
-  still shown raw. The configured threshold and action are also no longer lost
-  when the polled record omits them.
-
-### Added
-
-- **When the rain threshold last fired.** A *last_threshold_alert* attribute on
-  the *rain threshold* binary sensor, from SOLEM's own record.
-- **Diagnostics keep the first reading of each sensor's 24-hour window**, which
-  the 60-reading cap could drop — the only way to check a cumulative sensor's
-  daily total against MySOLEM's.
-
-## [0.9.0b1] - 2026-10-04
-
-First beta of 0.9.0. It is aimed at the people who reported
-[#8](https://github.com/antitoine/ha-solem-irrigation/issues/8) and
-[#12](https://github.com/antitoine/ha-solem-irrigation/issues/12): the rain
-gauge is built from a real LR-MS payload but has never run against one, and the
-new diagnostics readings are what the LR-IP-ECO's turbine flow meter is waiting
-on. To install it, enable **Show beta versions** in HACS.
-
-### Added
-
-- **Rain gauge support.** A SOLEM tipping-bucket rain gauge (pluviomètre — e.g.
-  the one on an LR-MS sensor module) now gets its own device, with a
-  *&lt;gauge&gt; rainfall* sensor — SOLEM's lifetime total in mm, ready for
-  long-term statistics and a `utility_meter` — and a *&lt;gauge&gt; rain
-  threshold* binary sensor carrying SOLEM's own "beyond thresholds" flag as-is,
-  with the threshold set in MySOLEM as an attribute. Identified by SOLEM's own
-  input type (14), as listed in its web app; the scaling is the per-gauge
-  expression SOLEM ships.
-  ([#8](https://github.com/antitoine/ha-solem-irrigation/issues/8))
-- **Leftover devices can be deleted.** A replaced gateway or controller is a
-  new module, so its old device used to linger forever with every entity
-  *unavailable*, and Home Assistant offered no way to remove it. Any device the
-  integration no longer exposes can now be deleted, even if the old module is
-  still listed in MySOLEM; one still exposed is refused, as it would only come
-  back.
-- **Diagnostics now include each sensor's recent readings.** For every
-  configured input — modelled or not — the dump carries its newest raw tick and
-  up to 60 scaled ticks from the last 24 hours, plus any flag that changed since
-  setup. The module page holds no readings at all, so for a sensor the
-  integration does not model yet (such as the LR-IP-ECO's turbine flow meter,
-  [#12](https://github.com/antitoine/ha-solem-irrigation/issues/12)), this is
-  what reveals its scale and behaviour.
 
 ## [0.8.1] - 2026-10-04
 
@@ -388,10 +351,8 @@ instead of ~11 per-station/per-program controls.
 - Optimistic state updates with a delayed reconcile to cope with LoRa latency.
 - English and French translations.
 
-[Unreleased]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.9.0b3...HEAD
-[0.9.0b3]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.9.0b2...v0.9.0b3
-[0.9.0b2]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.9.0b1...v0.9.0b2
-[0.9.0b1]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.8.1...v0.9.0b1
+[Unreleased]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.6.0...v0.7.0
