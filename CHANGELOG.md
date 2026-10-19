@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Agricultural LR-AG modules are now supported.** SOLEM flags them as
+  agricultural rather than as watering devices, so they used to be skipped;
+  they now get the same entities as any controller.
+  ([#5](https://github.com/antitoine/ha-solem-irrigation/issues/5)) An LR-AG
+  differs in a few ways, as measured on one over a season:
+  - Several stations can water at once, so several valves can be open
+    together, *Watering station* lists every running station (and their
+    remaining times), and closing a valve stops only that station. A station
+    run by a program counts as watering too: it reports a different state from
+    a manual run.
+  - Stations are named after their programs, which is where MySOLEM keeps the
+    names given to them. Each program is one station's schedule, and the LR-AG
+    has no command to start one, so *Run program* runs that station for its
+    *Run duration*.
+  - *Irrigation enabled* and *Rain delay* follow the ON/OFF status each station
+    reports: ON while any station is, and the rain delay goes up to 15 days,
+    the most MySOLEM offers.
+
 ### Fixed
 
 - **The *Irrigation enabled* switch and the *Rain delay* number no longer

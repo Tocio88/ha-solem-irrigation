@@ -5,7 +5,11 @@ from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryNotReady,
+    ServiceValidationError,
+)
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -1219,3 +1223,448 @@ async def test_poll_keeps_the_previous_rain_sensor_reading_on_failure(coordinato
     await coordinator._async_update_data()
     assert coordinator.rain_sensor_reading("c1").wet is True
     assert coordinator.rain_sensor_reading("other") is None
+
+
+# -- agricultural (LR-AG) modules ---------------------------------------------
+
+# The flags an LR-AG's module record carries (#5): not a watering type.
+AG_FLAGS = {
+    "typeIsWatering": False,
+    "typeIsAgricultural": True,
+    "typeIsLrag": True,
+    "isBluetoothOnly": False,
+}
+
+
+def _ag_module(**kwargs) -> SolemModule:
+    base = dict(
+        id="ag1",
+        name="Field",
+        serial="AGSER",
+        type="lr-ag",
+        display_type="lr-ag",
+        raw=dict(AG_FLAGS),
+        stations=[
+            SolemStation(id="o1", name="North", index=1),
+            SolemStation(id="o2", name="South", index=2),
+            SolemStation(id="o3", name="Station 3", index=3),
+        ],
+        # One program per station, counted from 0.
+        programs=[
+            SolemProgram(id="pr1", name="North", index=0),
+            SolemProgram(id="pr2", name="South", index=1),
+            SolemProgram(id="pr3", name="Station 3", index=2),
+        ],
+    )
+    base.update(kwargs)
+    return SolemModule(**base)
+
+
+def _ag_output(index: int, state: int = 0, rain_delay: int = 0, time="00:00"):
+    """One entry of ``status.ag.outputs``, whose ``index`` counts from 0."""
+    return {"index": index, "state": state, "time": time, "rainDelay": rain_delay}
+
+
+def _ag_state(*outputs) -> dict:
+    """An LR-AG live state, shaped like a recorded one."""
+    return {
+        "status": {
+            "dialogTimeStamp": "2026-07-01T06:00:00.000Z",
+            "relayIsLongPolling": True,
+            "ag": {"outputs": list(outputs)},
+            "radio": [],
+        },
+        "lastRadioCommunication": "2026-07-01T06:00:00.000Z",
+        "batteryVoltage": 90,
+        "relay": "g1",
+        "waitingForStatusUpdate": False,
+    }
+
+
+def test_an_agricultural_module_is_a_controller():
+    assert _ag_module().is_agricultural is True
+    assert _ag_module().is_controller is True
+    # Either of SOLEM's two agricultural flags admits it.
+    assert _ag_module(raw={"typeIsAgricultural": True}).is_controller is True
+    assert _ag_module(raw={"typeIsLrag": True}).is_controller is True
+    assert _module().is_agricultural is False
+    # Still needs stations, like any controller.
+    assert _ag_module(stations=[]).is_controller is False
+
+
+def test_a_bluetooth_only_agricultural_module_is_not_a_controller():
+    """A BL-AG is out for the same reason as any Bluetooth-only controller."""
+    module = _ag_module(type="bl-ag", raw={"typeIsAgricultural": True})
+    assert module.is_bluetooth_only is True
+    assert module.is_controller is False
+
+
+def test_paired_program_counts_programs_from_zero():
+    module = _ag_module()
+    assert module.paired_program(module.stations[1]).id == "pr2"
+    assert module.paired_program(SolemStation(id="o9", name="x", index=9)) is None
+
+
+async def test_setup_names_ag_stations_after_their_programs(coordinator):
+    """An LR-AG keeps factory output names; the app's names are on its programs."""
+    objs = {
+        "ag1": {
+            "name": "Field",
+            "type": "lr-ag",
+            **AG_FLAGS,
+            "outputs": [
+                {"id": "o1", "name": "Station 1", "index": 1},
+                {"id": "o2", "name": "Station 2", "index": 2},
+                {"id": "o3", "name": "Station 3", "index": 3},
+            ],
+            "programs": [
+                {"id": "pr1", "name": "North", "index": 0},
+                {"id": "pr2", "name": "South", "index": 1},
+                {"id": "pr3", "name": "", "index": 2},  # never renamed
+            ],
+        },
+        "m1": {
+            "name": "Ctrl",
+            "type": "lr-is",
+            "typeIsWatering": True,
+            "outputs": [{"id": "s1", "name": "Z1", "index": 1}],
+            "programs": [{"id": "p1", "name": "Matin", "index": 0}],
+        },
+    }
+    coordinator.client.async_login = AsyncMock(return_value="uid")
+    coordinator.client.async_get_module_ids = AsyncMock(return_value=["ag1", "m1"])
+    coordinator.client.async_get_module_page = AsyncMock(
+        side_effect=lambda mid: (objs[mid], [])
+    )
+
+    await coordinator.async_setup()
+
+    module = coordinator.modules["ag1"]
+    assert module.is_controller is True
+    assert [s.name for s in module.stations] == ["North", "South", "Station 3"]
+    assert module.find_station("South").id == "o2"
+    # A watering controller keeps its own station names.
+    assert coordinator.modules["m1"].stations[0].name == "Z1"
+
+
+async def test_ag_running_outputs_reads_every_output(coordinator):
+    """Several stations can water at once, and a program run reports ``state`` 2."""
+    coordinator.modules = {"ag1": _ag_module()}
+    coordinator.data = {
+        "ag1": _ag_state(
+            _ag_output(2, state=2, time="00:40"),  # a program run
+            _ag_output(0, state=1, time="00:05"),  # a manual run
+            _ag_output(1, state=0),
+            {"index": "x", "state": 1},
+            {"state": 1},
+            "garbage",
+            {"index": 5, "state": "on"},
+        )
+    }
+    assert list(coordinator.ag_running_outputs("ag1")) == [1, 3]
+    assert coordinator.ag_running_outputs("ag1")[3]["time"] == "00:40"
+    assert coordinator.ag_running_outputs("unknown") == {}
+
+
+@pytest.mark.parametrize(
+    ("delays", "enabled", "days"),
+    [
+        ((0, 0, 0), True, 0),
+        # 255 is a permanent OFF (the recorded LR-AG state reads exactly this).
+        ((255, 255, 255), False, 0),
+        ((3, 3, 3), False, 3),
+        # On while any output still is.
+        ((0, 255, 3), True, 0),
+        # Every output off: back on with the first one that comes back.
+        ((255, 3, 5), False, 3),
+    ],
+)
+async def test_reported_ag_status(coordinator, delays, enabled, days):
+    coordinator.modules = {"ag1": _ag_module()}
+    coordinator.data = {
+        "ag1": _ag_state(
+            *(_ag_output(i, rain_delay=d) for i, d in enumerate(delays)),
+            {"index": 3, "rainDelay": "x"},  # unreadable: ignored
+        )
+    }
+    assert coordinator.watering_enabled("ag1") is enabled
+    assert coordinator.rain_delay_days("ag1") == days
+
+
+async def test_ag_status_unknown_without_any_rain_delay(coordinator):
+    coordinator.data = {"ag1": _ag_state({"index": 0, "state": 1})}
+    assert coordinator.watering_enabled("ag1") is None
+    assert coordinator.rain_delay_days("ag1") is None
+
+
+async def test_ag_poll_reads_status_and_admits_its_gateway(coordinator):
+    module = _ag_module()
+    gateway = _module(id="g1", raw={"typeIsRelay": True}, stations=[])
+    coordinator.modules = {"ag1": module, "g1": gateway}
+    coordinator.client.async_get_module_state = AsyncMock(
+        side_effect=lambda mid: (
+            _ag_state(*(_ag_output(i, rain_delay=255) for i in range(3)))
+            if mid == "ag1"
+            else {}
+        )
+    )
+
+    coordinator.data = await coordinator._async_update_data()
+
+    assert coordinator.watering_enabled("ag1") is False
+    assert coordinator.rain_delay_days("ag1") == 0
+    assert coordinator.ag_running_outputs("ag1") == {}
+    assert coordinator.relevant_module_ids() == {"ag1", "g1"}
+
+
+async def test_ag_command_run_station_names_its_program(coordinator):
+    module = _ag_module()
+    coordinator.modules = {"ag1": module}
+    coordinator.data = {}
+    coordinator.client.async_run_ag_station = AsyncMock()
+    coordinator.async_schedule_refresh = MagicMock()
+
+    await coordinator.async_command_run_station(module, module.stations[1], 30)
+
+    coordinator.client.async_run_ag_station.assert_awaited_once_with(
+        "AGSER", "ag1", "pr2", 1, 30
+    )
+    # Shown at once, even before the first poll filled the cache.
+    assert list(coordinator.ag_running_outputs("ag1")) == [2]
+    coordinator.async_schedule_refresh.assert_called_once()
+
+
+async def test_ag_command_run_station_keeps_other_stations_running(coordinator):
+    module = _ag_module()
+    coordinator.modules = {"ag1": module}
+    coordinator.data = {"ag1": _ag_state(_ag_output(0, state=2), _ag_output(1))}
+    coordinator.client.async_run_ag_station = AsyncMock()
+    coordinator.async_schedule_refresh = MagicMock()
+
+    await coordinator.async_command_run_station(module, module.stations[1], 5)
+
+    assert list(coordinator.ag_running_outputs("ag1")) == [1, 2]
+    # The rest of the live state is left alone.
+    assert coordinator.module_state("ag1")["relay"] == "g1"
+
+
+async def test_ag_command_run_station_without_a_program(coordinator):
+    module = _ag_module(programs=[])
+    coordinator.modules = {"ag1": module}
+    coordinator.data = {}
+    coordinator.client.async_run_ag_station = AsyncMock()
+    coordinator.async_schedule_refresh = MagicMock()
+
+    await coordinator.async_command_run_station(module, module.stations[0], 5)
+
+    coordinator.client.async_run_ag_station.assert_awaited_once_with(
+        "AGSER", "ag1", "o1", 0, 5
+    )
+
+
+async def test_ag_command_stop_stops_every_station(coordinator):
+    module = _ag_module()
+    coordinator.modules = {"ag1": module}
+    coordinator.data = {
+        "ag1": _ag_state(_ag_output(0, state=1), _ag_output(2, state=2))
+    }
+    coordinator.client.async_stop_ag_stations = AsyncMock()
+    coordinator.client.async_stop = AsyncMock()
+    coordinator.async_schedule_refresh = MagicMock()
+
+    await coordinator.async_command_stop(module)
+
+    coordinator.client.async_stop_ag_stations.assert_awaited_once_with(
+        "AGSER", [0, 1, 2]
+    )
+    coordinator.client.async_stop.assert_not_awaited()
+    assert coordinator.ag_running_outputs("ag1") == {}
+    coordinator.async_schedule_refresh.assert_called_once()
+
+
+async def test_ag_command_stop_station_stops_only_that_one(coordinator):
+    module = _ag_module()
+    coordinator.modules = {"ag1": module}
+    coordinator.data = {
+        "ag1": _ag_state(_ag_output(0, state=1), _ag_output(2, state=2))
+    }
+    coordinator.client.async_stop_ag_station = AsyncMock()
+    coordinator.async_schedule_refresh = MagicMock()
+
+    await coordinator.async_command_stop_ag_station(module, module.stations[2])
+
+    coordinator.client.async_stop_ag_station.assert_awaited_once_with(
+        "AGSER", "ag1", "o3", 2
+    )
+    assert list(coordinator.ag_running_outputs("ag1")) == [1]
+    coordinator.async_schedule_refresh.assert_called_once()
+
+
+async def test_ag_command_run_program_runs_its_station(coordinator):
+    """An LR-AG has no program-start command: its program's station is run."""
+    module = _ag_module()
+    coordinator.modules = {"ag1": module}
+    coordinator.data = {}
+    coordinator.run_minutes = {"o2": 25}
+    coordinator.client.async_run_ag_station = AsyncMock()
+    coordinator.client.async_run_program = AsyncMock()
+    coordinator.async_schedule_refresh = MagicMock()
+
+    await coordinator.async_command_run_program(module, module.programs[1])
+
+    coordinator.client.async_run_ag_station.assert_awaited_once_with(
+        "AGSER", "ag1", "pr2", 1, 25
+    )
+    coordinator.client.async_run_program.assert_not_awaited()
+    assert list(coordinator.ag_running_outputs("ag1")) == [2]
+
+
+async def test_ag_command_run_program_without_a_station(coordinator):
+    module = _ag_module()
+    orphan = SolemProgram(id="pr9", name="Spare", index=8)
+    module.programs.append(orphan)
+    coordinator.client.async_run_ag_station = AsyncMock()
+
+    with pytest.raises(ServiceValidationError):
+        await coordinator.async_command_run_program(module, orphan)
+    coordinator.client.async_run_ag_station.assert_not_awaited()
+
+
+async def test_ag_command_set_status_uses_its_own_endpoint(coordinator):
+    module = _ag_module()
+    coordinator.modules = {"ag1": module}
+    coordinator.data = {"ag1": _ag_state(*(_ag_output(i) for i in range(3)))}
+    coordinator.client.async_set_ag_status = AsyncMock()
+    coordinator.client.async_set_status = AsyncMock()
+    coordinator.async_schedule_refresh = MagicMock()
+
+    await coordinator.async_command_set_status(module, enabled=False, days=4)
+
+    coordinator.client.async_set_ag_status.assert_awaited_once_with(
+        "ag1", enabled=False, days=4
+    )
+    coordinator.client.async_set_status.assert_not_awaited()
+    assert coordinator._status_pending["ag1"][:2] == (False, 4)
+    # Patched the way the LR-AG reports it: per output.
+    outputs = coordinator.module_state("ag1")["status"]["ag"]["outputs"]
+    assert [o["rainDelay"] for o in outputs] == [4, 4, 4]
+    assert coordinator.rain_delay_days("ag1") == 4
+
+    # A permanent OFF is reported as 255, not 0.
+    await coordinator.async_command_set_status(module, enabled=False)
+    outputs = coordinator.module_state("ag1")["status"]["ag"]["outputs"]
+    assert [o["rainDelay"] for o in outputs] == [255, 255, 255]
+
+
+async def test_ag_command_set_status_holds_until_the_cloud_confirms_it(coordinator):
+    module = _ag_module()
+    coordinator.modules = {"ag1": module}
+    on = _ag_state(*(_ag_output(i) for i in range(3)))
+    coordinator.data = {"ag1": on}
+    coordinator.client.async_set_ag_status = AsyncMock()
+    coordinator.async_schedule_refresh = MagicMock()
+    await coordinator.async_command_set_status(module, enabled=False, days=2)
+
+    # The reconcile poll still reads every output ON.
+    coordinator.client.async_get_module_state = AsyncMock(return_value=on)
+    coordinator.data = await coordinator._async_update_data()
+    assert coordinator.watering_enabled("ag1") is False
+    assert coordinator.rain_delay_days("ag1") == 2
+
+    # Then the ack: every output reports the delay.
+    coordinator.client.async_get_module_state = AsyncMock(
+        return_value=_ag_state(*(_ag_output(i, rain_delay=2) for i in range(3)))
+    )
+    coordinator.data = await coordinator._async_update_data()
+    assert "ag1" not in coordinator._status_pending
+    assert coordinator.rain_delay_days("ag1") == 2
+
+
+async def test_a_classic_module_ignores_a_null_ag_block(coordinator):
+    coordinator.modules = {"m1": _module()}
+    coordinator.data = {
+        "m1": {"status": {"ag": None, "watering": {"state": 1, "rainDelay": 0}}}
+    }
+    assert coordinator.watering_enabled("m1") is True
+    assert coordinator.rain_delay_days("m1") == 0
+
+
+async def test_a_classic_module_reads_watering_even_if_it_carries_ag_outputs(
+    coordinator,
+):
+    coordinator.modules = {"m1": _module()}
+    coordinator.data = {
+        "m1": {
+            "status": {
+                "ag": {"outputs": [_ag_output(0, rain_delay=0)]},
+                "watering": {"state": 0, "rainDelay": 0},
+            }
+        }
+    }
+    assert coordinator.watering_enabled("m1") is False
+
+
+async def test_ag_status_ignores_outputs_that_are_not_stations(coordinator):
+    """An orphan output the all-stations command never touches cannot block OFF."""
+    coordinator.modules = {"ag1": _ag_module()}
+    coordinator.data = {
+        "ag1": _ag_state(
+            *(_ag_output(i, rain_delay=255) for i in range(3)),
+            _ag_output(7, rain_delay=0),
+        )
+    }
+    assert coordinator.watering_enabled("ag1") is False
+
+
+async def test_ag_command_set_status_rejects_a_rain_delay_over_the_cap(coordinator):
+    module = _ag_module()
+    coordinator.modules = {"ag1": module}
+    coordinator.client.async_set_ag_status = AsyncMock()
+    with pytest.raises(ServiceValidationError, match="15"):
+        await coordinator.async_command_set_status(module, enabled=False, days=16)
+    coordinator.client.async_set_ag_status.assert_not_awaited()
+
+
+async def test_ag_command_set_status_on_is_acked_by_a_later_poll(coordinator):
+    module = _ag_module()
+    coordinator.modules = {"ag1": module}
+    off = _ag_state(*(_ag_output(i, rain_delay=255) for i in range(3)))
+    coordinator.data = {"ag1": off}
+    coordinator.client.async_set_ag_status = AsyncMock()
+    coordinator.async_schedule_refresh = MagicMock()
+    await coordinator.async_command_set_status(module, enabled=True)
+    assert coordinator._status_pending["ag1"][:2] == (True, 0)
+
+    # Still OFF at the cloud: held.
+    coordinator.client.async_get_module_state = AsyncMock(return_value=off)
+    coordinator.data = await coordinator._async_update_data()
+    assert coordinator._status_pending["ag1"][:2] == (True, 0)
+    assert coordinator.watering_enabled("ag1") is True
+
+    # Every station output back at rainDelay 0: acked.
+    coordinator.client.async_get_module_state = AsyncMock(
+        return_value=_ag_state(*(_ag_output(i) for i in range(3)))
+    )
+    coordinator.data = await coordinator._async_update_data()
+    assert "ag1" not in coordinator._status_pending
+    assert coordinator.watering_enabled("ag1") is True
+
+
+async def test_ag_command_set_status_ignores_a_poll_started_before_it(coordinator):
+    """OFF, ON: a poll in flight since before the ON reads every output ON too."""
+    module = _ag_module()
+    coordinator.modules = {"ag1": module}
+    on = _ag_state(*(_ag_output(i) for i in range(3)))
+    coordinator.data = {"ag1": on}
+    coordinator.client.async_set_ag_status = AsyncMock()
+    coordinator.async_schedule_refresh = MagicMock()
+    await coordinator.async_command_set_status(module, enabled=False)
+
+    async def state(_mid):
+        # The command lands while this poll's request is out.
+        await coordinator.async_command_set_status(module, enabled=True)
+        return on
+
+    coordinator.client.async_get_module_state = AsyncMock(side_effect=state)
+    coordinator.data = await coordinator._async_update_data()
+    assert coordinator._status_pending["ag1"][:2] == (True, 0)

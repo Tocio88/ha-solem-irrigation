@@ -34,6 +34,8 @@ MAX_RUN_MINUTES = 12 * 60  # the controller takes hours + minutes (max 12h)
 
 # Rain-delay (a.k.a. "off for N days"); 0 days == enabled.
 MAX_RAIN_DELAY_DAYS = 30
+# The LR-AG's own "all stations" OFF offers no more than this in the web app.
+MAX_RAIN_DELAY_DAYS_AG = 15
 
 # On/off as the live state reports it, in ``status.watering``. SOLEM's web app
 # reads ``state`` 0 (or the string "OFF") as off, and ``rainDelay`` as the days

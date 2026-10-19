@@ -126,6 +126,66 @@ def test_running_station_no_time_remaining_when_zero(coordinator, module):
     assert sensor.extra_state_attributes is None
 
 
+def _ag_module() -> SolemModule:
+    return SolemModule(
+        id="ag1",
+        name="Field",
+        serial="AGSER",
+        type="lr-ag",
+        display_type="lr-ag",
+        raw={"typeIsWatering": False, "typeIsAgricultural": True},
+        stations=[STATION_1, STATION_2],
+        programs=[],
+    )
+
+
+def test_ag_running_stations_are_joined(coordinator):
+    """An LR-AG can water several stations at once."""
+    module = _ag_module()
+    coordinator.modules = {module.id: module}
+    coordinator.ag_running_outputs.return_value = {
+        1: {"state": 1, "time": "00:10"},
+        2: {"state": 2, "time": "01:05"},
+        7: {"state": 2, "time": "00:00"},
+    }
+    sensor = SolemRunningStationSensor(coordinator, module)
+    assert sensor.native_value == "Pelouse 1, Potager, Station 7"
+    # One entry per station, so the times stay aligned with the names.
+    assert sensor.extra_state_attributes == {"time_remaining": "00:10, 01:05, --:--"}
+
+
+def test_ag_running_stations_keep_their_times_aligned_before_the_first_poll(
+    coordinator,
+):
+    """After the optimistic patch a station has no time yet: it must not shift."""
+    module = _ag_module()
+    coordinator.modules = {module.id: module}
+    coordinator.ag_running_outputs.return_value = {
+        1: {"state": 1, "time": "00:00"},
+        2: {"state": 1, "time": "00:40"},
+    }
+    sensor = SolemRunningStationSensor(coordinator, module)
+    assert sensor.native_value == "Pelouse 1, Potager"
+    assert sensor.extra_state_attributes == {"time_remaining": "--:--, 00:40"}
+
+
+def test_ag_running_stations_without_any_time_report_none(coordinator):
+    module = _ag_module()
+    coordinator.modules = {module.id: module}
+    coordinator.ag_running_outputs.return_value = {1: {"state": 1}}
+    sensor = SolemRunningStationSensor(coordinator, module)
+    assert sensor.extra_state_attributes is None
+
+
+def test_ag_running_station_idle(coordinator):
+    module = _ag_module()
+    coordinator.modules = {module.id: module}
+    coordinator.ag_running_outputs.return_value = {}
+    sensor = SolemRunningStationSensor(coordinator, module)
+    assert sensor.native_value is None
+    assert sensor.extra_state_attributes is None
+
+
 # -- last communication -------------------------------------------------------
 
 

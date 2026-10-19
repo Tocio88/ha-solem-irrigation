@@ -15,10 +15,16 @@ below were reverse-engineered from the web app:
 * ``GET  /input/getLastTickFromInput``         -> newest sensor tick (JSON)
 * ``GET  /remote/module/getComputedSensorsData`` -> windowed sensor series (JSON)
 * ``POST /module/sendManualModuleCommand``     -> manual commands (form-urlencoded)
+* ``POST /module/{id}/all-stations-status``    -> LR-AG on/off + rain delay (JSON)
 
 Note that ``inputs`` (the module's sensors, e.g. a flow meter) are *not* part of
 the ``let module`` object: they live in a sibling ``var inputs`` array on the
 same page, so both are parsed from a single fetch.
+
+Agricultural modules (LR-AG) take manual commands on the same endpoint, in a
+vocabulary of their own: each names a station by its 0-based ``outputIndex``
+alongside an ``agriculturalModuleId``, and stations are stopped one by one with
+``commandParams=stop`` rather than with a global ``manualStop``.
 """
 
 from __future__ import annotations
@@ -392,6 +398,94 @@ class SolemApiClient:
         """Stop any running manual watering / program (global)."""
         await self._send_command(serial, {"commandType": CMD_STOP})
 
+    # -- writes (agricultural / LR-AG modules) -----------------------------
+
+    async def async_run_ag_station(
+        self,
+        serial: str,
+        module_id: str,
+        program_id: str,
+        output_index: int,
+        minutes: int,
+    ) -> None:
+        """Run one LR-AG station for ``minutes``.
+
+        The run names the station twice: by its 0-based ``output_index`` and by
+        the id of the *program* bound to it -- not the output's own id, which
+        only the stop takes. ``commandParams[on]/[off]`` are the web app's
+        water/soak cycle in seconds; 0/0 waters continuously.
+        """
+        hours, mins = divmod(max(1, int(minutes)), 60)
+        await self._send_command(
+            serial,
+            {
+                "outputIndex": output_index,
+                "agriculturalModuleId": module_id,
+                "commandType": CMD_STATION,
+                "command": program_id,
+                "commandParams[on]": 0,
+                "commandParams[off]": 0,
+                "commandParams[hours]": hours,
+                "commandParams[minutes]": mins,
+            },
+        )
+
+    async def async_stop_ag_station(
+        self, serial: str, module_id: str, output_id: str, output_index: int
+    ) -> None:
+        """Stop one LR-AG station, leaving any other one running."""
+        await self._send_command(
+            serial,
+            {
+                "outputIndex": output_index,
+                "agriculturalModuleId": module_id,
+                "commandType": CMD_STATION,
+                "command": output_id,
+                "commandParams": "stop",
+            },
+        )
+
+    async def async_stop_ag_stations(
+        self, serial: str, output_indexes: list[int]
+    ) -> None:
+        """Stop several LR-AG stations (0-based indexes) in one command.
+
+        The web app sends this as a repeated ``outputIndex[]`` field with an
+        empty ``command``. A dict cannot repeat a key, so the form is built as
+        ``(key, value)`` pairs instead of going through :meth:`_send_command`.
+        """
+        await self._ensure_login()
+        await self._request_text(
+            "POST",
+            "/module/sendManualModuleCommand",
+            data=[
+                ("moduleSerialNumber", serial),
+                ("commandType", CMD_STATION),
+                ("command", ""),
+                ("commandParams", "stop"),
+                *(("outputIndex[]", str(index)) for index in output_indexes),
+            ],
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+
+    async def async_set_ag_status(
+        self, module_id: str, enabled: bool, days: int = 0
+    ) -> None:
+        """Turn every station of an LR-AG ON, or OFF permanently / for ``days``.
+
+        In this request ``rainDelay`` 0 means a *permanent* OFF, while the live
+        state reports that same OFF as 255.
+        """
+        await self._ensure_login()
+        await self._request_text(
+            "POST",
+            f"/module/{module_id}/all-stations-status",
+            json_body={
+                "command": STATUS_ON if enabled else STATUS_OFF,
+                "rainDelay": 0 if enabled else max(0, int(days)),
+            },
+        )
+
     async def async_set_status(self, serial: str, enabled: bool, days: int = 0) -> None:
         """Enable/disable the controller.
 
@@ -425,7 +519,7 @@ class SolemApiClient:
         method: str,
         path: str,
         *,
-        data: dict[str, Any] | None = None,
+        data: dict[str, Any] | list[tuple[str, str]] | None = None,
         json_body: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         _retry: bool = True,

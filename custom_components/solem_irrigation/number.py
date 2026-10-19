@@ -17,7 +17,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import MAX_RAIN_DELAY_DAYS, MAX_RUN_MINUTES, MIN_RUN_MINUTES
+from .const import (
+    MAX_RAIN_DELAY_DAYS,
+    MAX_RAIN_DELAY_DAYS_AG,
+    MAX_RUN_MINUTES,
+    MIN_RUN_MINUTES,
+)
 from .coordinator import (
     SolemConfigEntry,
     SolemDataUpdateCoordinator,
@@ -108,6 +113,8 @@ class SolemRainDelayNumber(SolemModuleEntity, RestoreNumber):
         """Initialise the rain-delay number."""
         super().__init__(coordinator, module)
         self._attr_unique_id = f"{module.id}_rain_delay"
+        if module.is_agricultural:
+            self._attr_native_max_value = MAX_RAIN_DELAY_DAYS_AG
         self._value = 0.0
 
     async def async_added_to_hass(self) -> None:

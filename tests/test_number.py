@@ -104,3 +104,18 @@ async def test_async_setup_entry_rain_delay_plus_per_station(coordinator, module
 
     unique_ids = sorted(n.unique_id for n in added)
     assert unique_ids == ["m1_rain_delay", "m1_run_duration_s1"]
+
+
+def test_ag_rain_delay_is_capped_at_the_web_app_maximum(coordinator):
+    module = SolemModule(
+        id="ag1",
+        name="Field",
+        serial="AGSER",
+        type="lr-ag",
+        display_type="lr-ag",
+        raw={"typeIsWatering": False, "typeIsAgricultural": True},
+        stations=[STATION_1],
+        programs=[],
+    )
+    coordinator.modules = {module.id: module}
+    assert SolemRainDelayNumber(coordinator, module).native_max_value == 15
