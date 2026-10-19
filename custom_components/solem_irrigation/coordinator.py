@@ -34,6 +34,7 @@ from .const import (
     DEFAULT_RUN_MINUTES,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
+    ENABLE_ACK_GRACE,
     FLOW_IDLE_AFTER,
     FLOW_WINDOW,
     INPUT_TYPE_FLOW_METER,
@@ -140,6 +141,19 @@ class SolemRainSensorReading:
 
     wet: bool
     timestamp: datetime
+
+
+def _reported_enabled(state: dict[str, Any]) -> bool | None:
+    """The ON/OFF status a live-state record carries, or None if it has none.
+
+    Read the way SOLEM's web app reads it: ``state`` 0 (or "OFF") is off, any
+    other value is on. ``state`` does *not* say whether a station is running --
+    it reads 1 both while idle and while watering.
+    """
+    value = state.get("status", {}).get("watering", {}).get("state")
+    if value is None:
+        return None
+    return value not in WATERING_STATES_OFF
 
 
 def _scalable_inputs(
@@ -402,6 +416,9 @@ class SolemDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]
         )
         self._refresh_unsub: Callable[[], None] | None = None
         entry.async_on_unload(self._cancel_scheduled_refresh)
+        # ON/OFF commands the cloud has not confirmed yet:
+        # module id -> (enabled, days, issued at). See ``watering_enabled``.
+        self._status_pending: dict[str, tuple[bool, int, datetime]] = {}
 
     @callback
     def _cancel_scheduled_refresh(self) -> None:
@@ -561,6 +578,8 @@ class SolemDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]
     async def _async_update_data(self) -> dict[str, dict[str, Any]]:
         """Poll the live watering state of every known module."""
         states: dict[str, dict[str, Any]] = {}
+        fetched: set[str] = set()
+        polled_at = dt_util.utcnow()
         last_error: SolemConnectionError | None = None
         for module_id, module in self.modules.items():
             if module.is_bluetooth_only:
@@ -570,6 +589,7 @@ class SolemDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]
                 continue
             try:
                 states[module_id] = await self.client.async_get_module_state(module_id)
+                fetched.add(module_id)
             except SolemAuthError as err:
                 raise ConfigEntryAuthFailed(str(err)) from err
             except SolemConnectionError as err:
@@ -580,6 +600,20 @@ class SolemDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]
         # Only treat the cycle as failed if nothing at all came back.
         if last_error is not None and not any(states.values()):
             raise UpdateFailed(str(last_error))
+
+        # Only a status fetched AFTER an ON/OFF command counts as its ack: the
+        # cached one (kept above for a module whose poll failed) is patched
+        # with the command itself, and a poll started before the command may
+        # carry the status the command is reverting (ON, OFF, ON again).
+        for module_id, (enabled, _days, issued_at) in list(
+            self._status_pending.items()
+        ):
+            if (
+                module_id in fetched
+                and issued_at < polled_at
+                and _reported_enabled(states[module_id]) == enabled
+            ):
+                del self._status_pending[module_id]
 
         # Re-read the handful of module fields that only the (huge, setup-only)
         # module page would otherwise provide. One small request for the whole
@@ -765,24 +799,42 @@ class SolemDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]
         except TypeError, ValueError:
             return 0
 
+    def _pending_status(self, module_id: str) -> tuple[bool, int] | None:
+        """The ON/OFF command the cloud has yet to confirm, while it still counts.
+
+        The cloud reports the old status until the controller acks over LoRa,
+        which takes longer than the reconcile poll, so without this the switch
+        and the rain delay would flip back after every toggle, until the next
+        regular poll. A command never confirmed within the grace is dropped:
+        the cloud is then shown as is.
+        """
+        if (pending := self._status_pending.get(module_id)) is None:
+            return None
+        enabled, days, issued_at = pending
+        if dt_util.utcnow() - issued_at < ENABLE_ACK_GRACE:
+            return enabled, days
+        del self._status_pending[module_id]
+        return None
+
     def watering_enabled(self, module_id: str) -> bool | None:
         """Return whether the controller is ON, or None if the cloud does not say.
 
-        Read the way SOLEM's web app reads it: ``state`` 0 (or "OFF") is off,
-        any other value is on. ``state`` does *not* say whether a station is
-        running -- it reads 1 both while idle and while watering.
+        A just-issued ON/OFF command wins until the cloud confirms it (see
+        ``_pending_status``).
         """
-        state = self._watering(module_id).get("state")
-        if state is None:
-            return None
-        return state not in WATERING_STATES_OFF
+        if (pending := self._pending_status(module_id)) is not None:
+            return pending[0]
+        return _reported_enabled(self.module_state(module_id))
 
     def rain_delay_days(self, module_id: str) -> int | None:
         """Return the days left before an OFF controller turns itself back on.
 
         0 when it is on or off permanently; None if the cloud does not say.
         """
-        if (enabled := self.watering_enabled(module_id)) is None:
+        if (pending := self._pending_status(module_id)) is not None:
+            enabled, days = pending
+            return 0 if enabled else days
+        if (enabled := _reported_enabled(self.module_state(module_id))) is None:
             return None
         if enabled:
             return 0
@@ -839,10 +891,16 @@ class SolemDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]
         self, module: SolemModule, enabled: bool, days: int = 0
     ) -> None:
         """Turn a controller ON, or OFF permanently (``days=0``) or for N days."""
+        issued_at = dt_util.utcnow()
         await self.client.async_set_status(module.serial, enabled=enabled, days=days)
-        if self.watering_enabled(module.id) is not None:
+        pending = self._status_pending.get(module.id)
+        if _reported_enabled(self.module_state(module.id)) is not None and (
             # Only where the cloud reports the status: inventing one would make
-            # a controller that never does look like it reports it.
+            # a controller that never does look like it reports it. And never
+            # over a command issued later whose request happened to return first.
+            pending is None or pending[2] <= issued_at
+        ):
+            self._status_pending[module.id] = (enabled, days, issued_at)
             self._apply_optimistic_watering(
                 module.id, state=1 if enabled else 0, rainDelay=0 if enabled else days
             )

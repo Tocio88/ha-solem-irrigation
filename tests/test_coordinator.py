@@ -1,5 +1,6 @@
 """Tests for the SOLEM data update coordinator."""
 
+import asyncio
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock
 
@@ -20,6 +21,7 @@ from custom_components.solem_irrigation.const import (
     CONF_REGION,
     DEFAULT_RUN_MINUTES,
     DOMAIN,
+    ENABLE_ACK_GRACE,
 )
 from custom_components.solem_irrigation.coordinator import (
     SolemDataUpdateCoordinator,
@@ -563,7 +565,129 @@ async def test_command_set_status_invents_no_status(coordinator):
     coordinator.async_schedule_refresh = MagicMock()
     await coordinator.async_command_set_status(module, enabled=False)
     assert coordinator.watering_enabled("m1") is None
+    assert "m1" not in coordinator._status_pending
     coordinator.async_schedule_refresh.assert_called_once()
+
+
+async def _set_status_then_poll(coordinator, enabled, days, polled):
+    """Issue an ON/OFF command, then poll a cloud still reporting ``polled``."""
+    module = _module()
+    coordinator.modules = {"m1": module}
+    coordinator.data = _watering(state=1, rainDelay=0, runningStation=0)
+    coordinator.client.async_set_status = AsyncMock()
+    coordinator.async_schedule_refresh = MagicMock()
+    await coordinator.async_command_set_status(module, enabled=enabled, days=days)
+    coordinator.client.async_get_module_state = AsyncMock(
+        return_value={"status": {"watering": polled}}
+    )
+    coordinator.data = await coordinator._async_update_data()
+
+
+async def test_command_set_status_holds_until_the_cloud_confirms_it(coordinator):
+    """The reconcile poll lands before the LoRa ack: the old status must not win."""
+    await _set_status_then_poll(
+        coordinator, enabled=False, days=2, polled={"state": 1, "rainDelay": 0}
+    )
+    assert coordinator.watering_enabled("m1") is False
+    assert coordinator.rain_delay_days("m1") == 2
+
+    # The ack arrives: the cloud is authoritative again, from then on.
+    coordinator.client.async_get_module_state = AsyncMock(
+        return_value={"status": {"watering": {"state": 0, "rainDelay": 2}}}
+    )
+    coordinator.data = await coordinator._async_update_data()
+    assert "m1" not in coordinator._status_pending
+    coordinator.data = _watering(state=1, rainDelay=0)
+    assert coordinator.watering_enabled("m1") is True
+    assert coordinator.rain_delay_days("m1") == 0
+
+
+async def test_command_set_status_on_holds_too(coordinator):
+    await _set_status_then_poll(
+        coordinator, enabled=True, days=0, polled={"state": 0, "rainDelay": 3}
+    )
+    assert coordinator.watering_enabled("m1") is True
+    assert coordinator.rain_delay_days("m1") == 0
+
+
+async def test_command_set_status_gives_up_after_the_grace(coordinator):
+    """A command the cloud never confirms stops masking what it reports."""
+    await _set_status_then_poll(
+        coordinator, enabled=False, days=0, polled={"state": 1, "rainDelay": 0}
+    )
+    enabled, days, issued_at = coordinator._status_pending["m1"]
+    coordinator._status_pending["m1"] = (
+        enabled,
+        days,
+        issued_at - ENABLE_ACK_GRACE,
+    )
+    assert coordinator.watering_enabled("m1") is True
+    assert coordinator.rain_delay_days("m1") == 0
+    assert "m1" not in coordinator._status_pending
+
+
+async def test_command_set_status_ignores_a_matching_cached_status(coordinator):
+    """Agreement is judged on polled data only, never on the (patched) cache."""
+    await _set_status_then_poll(
+        coordinator, enabled=False, days=0, polled={"state": 1, "rainDelay": 0}
+    )
+    # Reading the status back does not count as the ack, however often.
+    assert coordinator.watering_enabled("m1") is False
+    assert coordinator.watering_enabled("m1") is False
+    assert "m1" in coordinator._status_pending
+
+    # Nor does a failed poll, which keeps the cached (patched) status.
+    coordinator.client.async_get_module_state = AsyncMock(
+        side_effect=SolemConnectionError("flaky")
+    )
+    coordinator.data = await coordinator._async_update_data()
+    assert coordinator.watering_enabled("m1") is False
+    assert "m1" in coordinator._status_pending
+
+
+async def test_command_set_status_ignores_a_poll_started_before_it(coordinator):
+    """ON, OFF, ON: a poll in flight since before the second ON reads ON too."""
+    module = _module()
+    coordinator.modules = {"m1": module}
+    coordinator.data = _watering(state=1, rainDelay=0, runningStation=0)
+    coordinator.client.async_set_status = AsyncMock()
+    coordinator.async_schedule_refresh = MagicMock()
+    await coordinator.async_command_set_status(module, enabled=False)
+
+    async def state(_mid):
+        # The command lands while this poll's request is out.
+        await coordinator.async_command_set_status(module, enabled=True)
+        return {"status": {"watering": {"state": 1, "rainDelay": 0}}}
+
+    coordinator.client.async_get_module_state = AsyncMock(side_effect=state)
+    coordinator.data = await coordinator._async_update_data()
+    assert coordinator._status_pending["m1"][:2] == (True, 0)
+
+
+async def test_command_set_status_keeps_the_later_of_overlapping_commands(
+    coordinator,
+):
+    module = _module()
+    coordinator.modules = {"m1": module}
+    coordinator.data = _watering(state=1, rainDelay=0, runningStation=0)
+    coordinator.async_schedule_refresh = MagicMock()
+    second_done = asyncio.Event()
+
+    async def slow_off(*_args, **_kwargs):
+        await second_done.wait()
+
+    coordinator.client.async_set_status = AsyncMock(side_effect=slow_off)
+    first = asyncio.ensure_future(
+        coordinator.async_command_set_status(module, enabled=False, days=3)
+    )
+    await asyncio.sleep(0)
+    coordinator.client.async_set_status = AsyncMock()
+    await coordinator.async_command_set_status(module, enabled=True)
+    second_done.set()
+    await first
+    assert coordinator._status_pending["m1"][:2] == (True, 0)
+    assert coordinator.watering_enabled("m1") is True
+    assert coordinator.rain_delay_days("m1") == 0
 
 
 async def test_command_run_program(coordinator):
