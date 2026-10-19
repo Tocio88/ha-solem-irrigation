@@ -13,6 +13,10 @@ time, so opening one station optimistically marks it running, which makes every
 other valve read *closed* — only one valve is ever open, faithfully modelling
 the hardware. Use the ``solem_irrigation.run`` service to run a station for a
 specific (non-default) duration.
+
+An agricultural LR-AG is the exception: it reports each station on its own and
+can water several at once, so several of its valves can be open together, and
+each one stops only its own station.
 """
 
 from __future__ import annotations
@@ -77,6 +81,10 @@ class SolemStationValve(SolemModuleEntity, ValveEntity):
     @property
     def is_closed(self) -> bool:
         """Open only while this station is the one currently watering."""
+        if self._module.is_agricultural:
+            return self._station.index not in self.coordinator.ag_running_outputs(
+                self._module_id
+            )
         return (
             self.coordinator.running_station_index(self._module_id)
             != self._station.index
@@ -94,8 +102,14 @@ class SolemStationValve(SolemModuleEntity, ValveEntity):
 
         Guarded so that closing an already-closed valve is a no-op: without it,
         closing zone A while zone B is running would send a global stop and halt
-        B — surprising when you have just switched zones.
+        B — surprising when you have just switched zones. An LR-AG station
+        stops on its own, so it is sent whatever the last poll said.
         """
+        if self._module.is_agricultural:
+            await self.coordinator.async_command_stop_ag_station(
+                self._module, self._station
+            )
+            return
         if (
             self.coordinator.running_station_index(self._module_id)
             == self._station.index

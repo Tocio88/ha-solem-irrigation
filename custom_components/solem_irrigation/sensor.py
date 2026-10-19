@@ -63,7 +63,11 @@ async def async_setup_entry(
 
 
 class SolemRunningStationSensor(SolemModuleEntity, SensorEntity):
-    """Name of the station currently watering (None when idle)."""
+    """Name of the station currently watering (None when idle).
+
+    An LR-AG can water several stations at once: their names are then joined,
+    and so are their remaining times, in the same order.
+    """
 
     _attr_translation_key = "running_station"
     _attr_icon = "mdi:sprinkler-variant"
@@ -78,6 +82,10 @@ class SolemRunningStationSensor(SolemModuleEntity, SensorEntity):
     @property
     def native_value(self) -> str | None:
         """Return the running station's name, or None if idle."""
+        if self._module.is_agricultural:
+            names = {station.index: station.name for station in self._module.stations}
+            running = self.coordinator.ag_running_outputs(self._module_id)
+            return ", ".join(names.get(i, f"Station {i}") for i in running) or None
         index = self.coordinator.running_station_index(self._module_id)
         if index <= 0:
             return None
@@ -89,6 +97,21 @@ class SolemRunningStationSensor(SolemModuleEntity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, str] | None:
         """Expose the remaining run time reported by the controller."""
+        if self._module.is_agricultural:
+            # One entry per running output, in the order of the names, so the
+            # two stay aligned: "--:--" stands in for a time not reported yet
+            # (the classic path above returns None instead, having one station).
+            times = [
+                str(output["time"])
+                if output.get("time") and output["time"] != "00:00"
+                else "--:--"
+                for output in self.coordinator.ag_running_outputs(
+                    self._module_id
+                ).values()
+            ]
+            if all(time == "--:--" for time in times):
+                return None
+            return {"time_remaining": ", ".join(times)}
         watering = (
             self.coordinator.module_state(self._module_id)
             .get("status", {})

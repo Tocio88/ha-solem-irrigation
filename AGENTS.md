@@ -33,7 +33,9 @@ maintainable.
   module page carries *two* embedded literals: `let module = {…}` and a sibling
   `var inputs = […]` (the module's sensors), so both come from one fetch.
 - **`coordinator.py`** — `DataUpdateCoordinator` that logs in, discovers modules
-  (classifying irrigation controllers via SOLEM's `typeIsWatering` flag),
+  (classifying irrigation controllers via SOLEM's `typeIsWatering` flag, and
+  agricultural LR-AG ones via `typeIsAgricultural`, which speak their own
+  command vocabulary and report one live state per output),
   polls live state, and owns the **optimistic update + delayed reconcile** used
   to mask slow LoRa downlinks. Also persists the per-station run duration and
   polls each flow meter (its lifetime counter plus a derived flow rate), rain
@@ -49,7 +51,8 @@ maintainable.
   platforms.
 - **Platforms** — thin wrappers over coordinator data:
   - `valve.py` — one valve per station (only one is ever open: the hardware
-    waters one station at a time).
+    waters one station at a time; an LR-AG, which can water several, is the
+    exception).
   - `switch.py` — the *Irrigation enabled* switch (live ON/OFF, assumed-state
     fallback); also registers the `run` and `set_enabled` services.
   - `select.py` — *Run program* (momentary; resets to a neutral option).

@@ -11,7 +11,11 @@ from typing import Any
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryNotReady,
+    ServiceValidationError,
+)
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.storage import Store
@@ -41,6 +45,7 @@ from .const import (
     INPUT_TYPE_RAIN_GAUGE,
     INPUT_TYPE_RAIN_SENSOR,
     LIVE_MODULE_FIELDS,
+    MAX_RAIN_DELAY_DAYS_AG,
     RAIN_DELAY_PERMANENT,
     REGION_EUROPE,
     STORAGE_KEY,
@@ -143,13 +148,62 @@ class SolemRainSensorReading:
     timestamp: datetime
 
 
-def _reported_enabled(state: dict[str, Any]) -> bool | None:
+def _ag_outputs(state: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    """An LR-AG's live outputs (``status.ag.outputs``), keyed by station index.
+
+    The wire counts these outputs from 0, while the module record -- and so
+    ``SolemStation.index`` -- counts them from 1. Empty for any other module.
+    """
+    outputs: dict[int, dict[str, Any]] = {}
+    for output in ((state.get("status") or {}).get("ag") or {}).get("outputs") or []:
+        if not isinstance(output, dict):
+            continue
+        try:
+            outputs[int(output["index"]) + 1] = output
+        except KeyError, TypeError, ValueError:
+            continue
+    return outputs
+
+
+def _ag_rain_delays(
+    state: dict[str, Any], stations: frozenset[int] | None = None
+) -> list[int]:
+    """Each LR-AG output's ``rainDelay``: 0 on, 255 off for good, N off N days.
+
+    An LR-AG has no module-wide status: every output carries its own, and the
+    web app turns them all ON or OFF at once. Only the outputs that are one of
+    the module's ``stations`` (by index) count, if given: an orphan output the
+    all-stations command never touches could otherwise block an OFF ack.
+    """
+    delays: list[int] = []
+    for index, output in _ag_outputs(state).items():
+        if stations is not None and index not in stations:
+            continue
+        try:
+            delays.append(int(output["rainDelay"]))
+        except KeyError, TypeError, ValueError:
+            continue
+    return delays
+
+
+def _reported_enabled(
+    state: dict[str, Any],
+    *,
+    agricultural: bool = False,
+    stations: frozenset[int] | None = None,
+) -> bool | None:
     """The ON/OFF status a live-state record carries, or None if it has none.
 
     Read the way SOLEM's web app reads it: ``state`` 0 (or "OFF") is off, any
     other value is on. ``state`` does *not* say whether a station is running --
     it reads 1 both while idle and while watering.
+
+    An LR-AG (``agricultural``) reads as on while any of its outputs is, since
+    it can then still water; it is off once every output is. Any other module
+    reads only its ``status.watering``, whatever else its state carries.
     """
+    if agricultural and (delays := _ag_rain_delays(state, stations)):
+        return 0 in delays
     value = state.get("status", {}).get("watering", {}).get("state")
     if value is None:
         return None
@@ -332,6 +386,17 @@ class SolemModule:
     raw_inputs: list[dict[str, Any]] = field(default_factory=list)
 
     @property
+    def is_agricultural(self) -> bool:
+        """True for an agricultural controller (LR-AG).
+
+        It waters like any controller, but SOLEM flags it ``typeIsWatering``
+        False and ``typeIsAgricultural`` / ``typeIsLrag`` True instead. It also
+        speaks its own command vocabulary, and reports one live state per
+        output (``status.ag.outputs``), as several stations can water at once.
+        """
+        return bool(self.raw.get("typeIsAgricultural") or self.raw.get("typeIsLrag"))
+
+    @property
     def is_controller(self) -> bool:
         """True for irrigation controllers the cloud can drive.
 
@@ -339,7 +404,8 @@ class SolemModule:
         signal: it is True for irrigation controllers (LR-IS/LR-IP/WF-IS…) and
         False for pool controllers (which can *also* expose ``outputs``),
         sensors, and the gateway. Filtering on ``type`` prefixes or merely
-        "has stations" would wrongly pick up the pool controller.
+        "has stations" would wrongly pick up the pool controller. An LR-AG is
+        the exception, admitted on its agricultural flag instead.
 
         A Bluetooth-only controller is left out: MySOLEM cannot reach it, so
         its entities could neither read its state nor command it -- they only
@@ -347,7 +413,7 @@ class SolemModule:
         """
         return (
             bool(self.stations)
-            and bool(self.raw.get("typeIsWatering"))
+            and (bool(self.raw.get("typeIsWatering")) or self.is_agricultural)
             and not self.is_bluetooth_only
         )
 
@@ -370,6 +436,25 @@ class SolemModule:
     def find_program(self, token: str | int) -> SolemProgram | None:
         """Return the program matching ``token`` (name or index), if any."""
         return _find_by_token(self.programs, token)
+
+    def paired_program(self, station: SolemStation) -> SolemProgram | None:
+        """Return the program an LR-AG binds to ``station``, if any.
+
+        An LR-AG has exactly one program per station, that station's schedule.
+        They pair by index, programs counting from 0 and stations from 1.
+        """
+        return next((p for p in self.programs if p.index == station.index - 1), None)
+
+
+def _name_stations_after_programs(module: SolemModule) -> None:
+    """Name each LR-AG station after its program, as the web app labels it.
+
+    An LR-AG keeps its outputs at their factory names ("Station 1"…): a name
+    given to a station in the app is stored on its program instead.
+    """
+    for station in module.stations:
+        if (program := module.paired_program(station)) is not None and program.name:
+            station.name = program.name
 
 
 class SolemDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
@@ -524,6 +609,8 @@ class SolemDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]
                     rain_sensors=_build_rain_sensors(inputs),
                     raw_inputs=inputs,
                 )
+                if module.is_agricultural:
+                    _name_stations_after_programs(module)
                 modules[module_id] = module
                 # ``input_types`` is what makes a sensor this integration does
                 # not model yet (a soil probe, a turbine) visible to a user who
@@ -611,7 +698,10 @@ class SolemDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]
             if (
                 module_id in fetched
                 and issued_at < polled_at
-                and _reported_enabled(states[module_id]) == enabled
+                and _reported_enabled(
+                    states[module_id], **self._status_scope(module_id)
+                )
+                == enabled
             ):
                 del self._status_pending[module_id]
 
@@ -799,6 +889,22 @@ class SolemDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]
         except TypeError, ValueError:
             return 0
 
+    def ag_running_outputs(self, module_id: str) -> dict[int, dict[str, Any]]:
+        """The LR-AG outputs watering right now, keyed by station index, in order.
+
+        Several can water at once. Measured live on an LR-AG: an output reports
+        ``state`` 1 during a manual run but 2 while a program runs it, so any
+        non-zero ``state`` is watering.
+        """
+        running: dict[int, dict[str, Any]] = {}
+        for index, output in sorted(_ag_outputs(self.module_state(module_id)).items()):
+            try:
+                if int(output.get("state") or 0) != 0:
+                    running[index] = output
+            except TypeError, ValueError:
+                continue
+        return running
+
     def _pending_status(self, module_id: str) -> tuple[bool, int] | None:
         """The ON/OFF command the cloud has yet to confirm, while it still counts.
 
@@ -816,6 +922,16 @@ class SolemDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]
         del self._status_pending[module_id]
         return None
 
+    def _status_scope(self, module_id: str) -> dict[str, Any]:
+        """How to read ``module_id``'s ON/OFF status: see ``_reported_enabled``."""
+        module = self.modules.get(module_id)
+        if module is None or not module.is_agricultural:
+            return {"agricultural": False, "stations": None}
+        return {
+            "agricultural": True,
+            "stations": frozenset(s.index for s in module.stations),
+        }
+
     def watering_enabled(self, module_id: str) -> bool | None:
         """Return whether the controller is ON, or None if the cloud does not say.
 
@@ -824,7 +940,9 @@ class SolemDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]
         """
         if (pending := self._pending_status(module_id)) is not None:
             return pending[0]
-        return _reported_enabled(self.module_state(module_id))
+        return _reported_enabled(
+            self.module_state(module_id), **self._status_scope(module_id)
+        )
 
     def rain_delay_days(self, module_id: str) -> int | None:
         """Return the days left before an OFF controller turns itself back on.
@@ -834,10 +952,17 @@ class SolemDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]
         if (pending := self._pending_status(module_id)) is not None:
             enabled, days = pending
             return 0 if enabled else days
-        if (enabled := _reported_enabled(self.module_state(module_id))) is None:
+        scope = self._status_scope(module_id)
+        state = self.module_state(module_id)
+        if (enabled := _reported_enabled(state, **scope)) is None:
             return None
         if enabled:
             return 0
+        if scope["agricultural"] and (
+            delays := _ag_rain_delays(state, scope["stations"])
+        ):
+            # Every output is off: the module is back on with the first one.
+            return min((d for d in delays if 0 < d < RAIN_DELAY_PERMANENT), default=0)
         try:
             days = int(self._watering(module_id).get("rainDelay", 0) or 0)
         except TypeError, ValueError:
@@ -862,46 +987,146 @@ class SolemDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]
         """Optimistically show ``index`` as the running station (0 = none)."""
         self._apply_optimistic_watering(module_id, runningStation=index)
 
+    def _apply_optimistic_ag_outputs(
+        self, module: SolemModule, stations: list[SolemStation], **fields: Any
+    ) -> None:
+        """Optimistically patch the live outputs of an LR-AG's ``stations``.
+
+        The LR-AG counterpart of ``_apply_optimistic_watering``. An output the
+        cache does not hold yet is added, as a classic running station would be.
+        """
+        data = dict(self.data or {})
+        state = dict(data.get(module.id, {}))
+        status = dict(state.get("status", {}))
+        outputs = {index: dict(output) for index, output in _ag_outputs(state).items()}
+        for station in stations:
+            outputs.setdefault(station.index, {"index": station.index - 1}).update(
+                fields
+            )
+        status["ag"] = {
+            **status.get("ag", {}),
+            "outputs": [outputs[index] for index in sorted(outputs)],
+        }
+        state["status"] = status
+        data[module.id] = state
+        self.async_set_updated_data(data)
+
     # -- commands (client call + optimistic update + reconcile) ------------
     # Shared by the station valves and the ``run`` service so the optimistic
     # update and the delayed reconcile are applied consistently on every path.
 
     async def async_command_stop(self, module: SolemModule) -> None:
-        """Stop any running watering on a controller (global stop)."""
-        await self.client.async_stop(module.serial)
-        self.apply_optimistic_running_station(module.id, 0)
+        """Stop any running watering on a controller (global stop).
+
+        An LR-AG has no global stop: every station is stopped in one command.
+        """
+        if module.is_agricultural:
+            await self.client.async_stop_ag_stations(
+                module.serial, [station.index - 1 for station in module.stations]
+            )
+            self._apply_optimistic_ag_outputs(module, module.stations, state=0)
+        else:
+            await self.client.async_stop(module.serial)
+            self.apply_optimistic_running_station(module.id, 0)
+        self.async_schedule_refresh()
+
+    async def async_command_stop_ag_station(
+        self, module: SolemModule, station: SolemStation
+    ) -> None:
+        """Stop a single LR-AG station, leaving any other one running."""
+        await self.client.async_stop_ag_station(
+            module.serial, module.id, station.id, station.index - 1
+        )
+        self._apply_optimistic_ag_outputs(module, [station], state=0)
         self.async_schedule_refresh()
 
     async def async_command_run_station(
         self, module: SolemModule, station: SolemStation, minutes: int
     ) -> None:
-        """Run a single station for ``minutes`` (replaces any running station)."""
-        await self.client.async_run_station(module.serial, station.id, minutes)
-        self.apply_optimistic_running_station(module.id, station.index)
+        """Run a single station for ``minutes`` (replaces any running station).
+
+        On an LR-AG, any other running station keeps watering.
+        """
+        if module.is_agricultural:
+            # The run names the station's program (the output id only for a
+            # station that has none), see ``SolemModule.paired_program``.
+            program = module.paired_program(station)
+            await self.client.async_run_ag_station(
+                module.serial,
+                module.id,
+                program.id if program else station.id,
+                station.index - 1,
+                minutes,
+            )
+            self._apply_optimistic_ag_outputs(module, [station], state=1)
+        else:
+            await self.client.async_run_station(module.serial, station.id, minutes)
+            self.apply_optimistic_running_station(module.id, station.index)
         self.async_schedule_refresh()
 
     async def async_command_run_program(
         self, module: SolemModule, program: SolemProgram
     ) -> None:
-        """Start a stored program (its first station appears on the next poll)."""
+        """Start a stored program (its first station appears on the next poll).
+
+        An LR-AG has no command to start a program: each one is the schedule of
+        a single station, so that station is run, for its run duration.
+        """
+        if module.is_agricultural:
+            station = next(
+                (s for s in module.stations if module.paired_program(s) is program),
+                None,
+            )
+            if station is None:
+                raise ServiceValidationError(
+                    f"Program {program.name} has no station to run"
+                )
+            await self.async_command_run_station(
+                module, station, self.get_run_minutes(station.id)
+            )
+            return
         await self.client.async_run_program(module.serial, program.id)
         self.async_schedule_refresh()
 
     async def async_command_set_status(
         self, module: SolemModule, enabled: bool, days: int = 0
     ) -> None:
-        """Turn a controller ON, or OFF permanently (``days=0``) or for N days."""
+        """Turn a controller ON, or OFF permanently (``days=0``) or for N days.
+
+        An LR-AG takes it on an endpoint of its own, for all its stations.
+        """
+        if module.is_agricultural and days > MAX_RAIN_DELAY_DAYS_AG:
+            raise ServiceValidationError(
+                f"An agricultural module can be disabled for at most "
+                f"{MAX_RAIN_DELAY_DAYS_AG} days"
+            )
         issued_at = dt_util.utcnow()
-        await self.client.async_set_status(module.serial, enabled=enabled, days=days)
+        if module.is_agricultural:
+            await self.client.async_set_ag_status(module.id, enabled=enabled, days=days)
+        else:
+            await self.client.async_set_status(
+                module.serial, enabled=enabled, days=days
+            )
         pending = self._status_pending.get(module.id)
-        if _reported_enabled(self.module_state(module.id)) is not None and (
+        if _reported_enabled(
+            self.module_state(module.id), **self._status_scope(module.id)
+        ) is not None and (
             # Only where the cloud reports the status: inventing one would make
             # a controller that never does look like it reports it. And never
             # over a command issued later whose request happened to return first.
             pending is None or pending[2] <= issued_at
         ):
             self._status_pending[module.id] = (enabled, days, issued_at)
-            self._apply_optimistic_watering(
-                module.id, state=1 if enabled else 0, rainDelay=0 if enabled else days
-            )
+            if module.is_agricultural:
+                self._apply_optimistic_ag_outputs(
+                    module,
+                    module.stations,
+                    rainDelay=0 if enabled else (days or RAIN_DELAY_PERMANENT),
+                )
+            else:
+                self._apply_optimistic_watering(
+                    module.id,
+                    state=1 if enabled else 0,
+                    rainDelay=0 if enabled else days,
+                )
         self.async_schedule_refresh()

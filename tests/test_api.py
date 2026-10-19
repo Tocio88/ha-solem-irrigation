@@ -540,6 +540,93 @@ async def test_set_status_disabled_with_days():
         assert fields == {"command": "off", "commandType": "status", "commandParams": 3}
 
 
+async def test_run_ag_station_names_the_program_and_the_output_index():
+    """An LR-AG run names its program, not its output, plus a 0-based index."""
+    async with aiohttp.ClientSession() as session:
+        client = _client(session)
+        client._send_command = AsyncMock()
+        await client.async_run_ag_station("SER", "mod1", "prog2", 1, 75)
+        serial, fields = client._send_command.call_args[0]
+        assert serial == "SER"
+        assert fields == {
+            "outputIndex": 1,
+            "agriculturalModuleId": "mod1",
+            "commandType": "station",
+            "command": "prog2",
+            "commandParams[on]": 0,
+            "commandParams[off]": 0,
+            "commandParams[hours]": 1,
+            "commandParams[minutes]": 15,
+        }
+
+
+async def test_run_ag_station_clamps_to_at_least_one_minute():
+    async with aiohttp.ClientSession() as session:
+        client = _client(session)
+        client._send_command = AsyncMock()
+        await client.async_run_ag_station("SER", "mod1", "prog1", 0, 0)
+        _, fields = client._send_command.call_args[0]
+        assert fields["commandParams[hours]"] == 0
+        assert fields["commandParams[minutes]"] == 1
+
+
+async def test_stop_ag_station_payload():
+    async with aiohttp.ClientSession() as session:
+        client = _client(session)
+        client._send_command = AsyncMock()
+        await client.async_stop_ag_station("SER", "mod1", "out1", 0)
+        serial, fields = client._send_command.call_args[0]
+        assert serial == "SER"
+        assert fields == {
+            "outputIndex": 0,
+            "agriculturalModuleId": "mod1",
+            "commandType": "station",
+            "command": "out1",
+            "commandParams": "stop",
+        }
+
+
+async def test_stop_ag_stations_repeats_the_output_index():
+    """The group stop repeats ``outputIndex[]``, which a dict cannot carry."""
+    async with aiohttp.ClientSession() as session:
+        client = _client(session)
+        client._user_id = USER_ID
+        client._request_text = AsyncMock(return_value="")
+        await client.async_stop_ag_stations("SER", [0, 1, 2])
+        args, kwargs = client._request_text.call_args
+        assert args == ("POST", "/module/sendManualModuleCommand")
+        assert kwargs["data"] == [
+            ("moduleSerialNumber", "SER"),
+            ("commandType", "station"),
+            ("command", ""),
+            ("commandParams", "stop"),
+            ("outputIndex[]", "0"),
+            ("outputIndex[]", "1"),
+            ("outputIndex[]", "2"),
+        ]
+        assert kwargs["headers"]["X-Requested-With"] == "XMLHttpRequest"
+
+
+@pytest.mark.parametrize(
+    ("enabled", "days", "body"),
+    [
+        (True, 5, {"command": "on", "rainDelay": 0}),
+        (False, 5, {"command": "off", "rainDelay": 5}),
+        # Here 0 is a permanent OFF (the live state reports it as 255).
+        (False, 0, {"command": "off", "rainDelay": 0}),
+    ],
+)
+async def test_set_ag_status_posts_json_to_its_own_endpoint(enabled, days, body):
+    async with aiohttp.ClientSession() as session:
+        client = _client(session)
+        client._user_id = USER_ID
+        client._request_text = AsyncMock(return_value="")
+        await client.async_set_ag_status("mod1", enabled=enabled, days=days)
+        args, kwargs = client._request_text.call_args
+        assert args == ("POST", "/module/mod1/all-stations-status")
+        assert kwargs["json_body"] == body
+
+
 async def test_send_command_builds_payload_and_headers():
     """``_send_command`` injects the serial and the XHR header."""
     async with aiohttp.ClientSession() as session:

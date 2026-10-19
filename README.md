@@ -18,7 +18,10 @@ Bluetooth-only community integrations cannot.
 with at least one station. Discovery does not care how a controller reaches the
 cloud, so LoRa modules behind an **LR-MB** gateway (LR-IS / LR-IP …) and
 **WiFi** modules (SMART-IS …) are both picked up, with no configuration
-difference. **Bluetooth-only** modules (BL-IP …) are the exception: MySOLEM
+difference. Agricultural **LR-AG** modules, which MySOLEM files apart from
+watering devices, are picked up too — see
+[limitations](#how-it-works--limitations) for how they differ.
+**Bluetooth-only** modules (BL-IP …) are the exception: MySOLEM
 has no live link to them, so they get no entities — see
 [limitations](#how-it-works--limitations). Development happens against an
 LR-IS behind an LR-MB-10; other models are reported working by their owners. If
@@ -126,6 +129,14 @@ pool integration, not this one.)
   naming them. For these, a Bluetooth integration such as
   [Solem Toolkit](https://github.com/hcraveiro/Home-Assistant-Solem-Toolkit) is
   the realistic route.
+- An agricultural **LR-AG** works like any controller, with these differences:
+  it can water several stations at once, so several of its valves can be open
+  together, *Watering station* lists them all, and closing a valve stops only
+  that station. Its stations are named after their programs, the names MySOLEM
+  shows for them. Each program is the schedule of one station, and the LR-AG
+  has no command to start one, so *Run program* (and `run` with
+  `mode: program`) runs that station for its *Run duration*. It is ON while
+  any station is, and its *Rain delay* goes up to 15 days, as in MySOLEM.
 - The *Irrigation enabled* switch and the *Rain delay* number follow the
   ON/OFF status the controller reports, so an OFF set from MySOLEM — by hand,
   or by a rain gauge crossing its threshold — shows up in Home Assistant too.

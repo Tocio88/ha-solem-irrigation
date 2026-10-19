@@ -100,3 +100,45 @@ async def test_async_setup_entry_one_valve_per_station(coordinator, module):
     await async_setup_entry(MagicMock(), entry, added.extend)
 
     assert sorted(v.unique_id for v in added) == ["m1_valve_s1", "m1_valve_s2"]
+
+
+# -- agricultural (LR-AG) -----------------------------------------------------
+
+
+@pytest.fixture
+def ag_module() -> SolemModule:
+    return SolemModule(
+        id="ag1",
+        name="Field",
+        serial="AGSER",
+        type="lr-ag",
+        display_type="lr-ag",
+        raw={"typeIsWatering": False, "typeIsAgricultural": True},
+        stations=[STATION_1, STATION_2],
+        programs=[],
+    )
+
+
+def test_ag_valves_open_together(coordinator, ag_module):
+    """An LR-AG can water several stations at once."""
+    coordinator.modules = {ag_module.id: ag_module}
+    coordinator.ag_running_outputs.return_value = {1: {}, 2: {}}
+    assert SolemStationValve(coordinator, ag_module, STATION_1).is_closed is False
+    assert SolemStationValve(coordinator, ag_module, STATION_2).is_closed is False
+    coordinator.ag_running_outputs.return_value = {2: {}}
+    assert SolemStationValve(coordinator, ag_module, STATION_1).is_closed is True
+    coordinator.running_station_index.assert_not_called()
+
+
+async def test_ag_close_stops_only_its_station(coordinator, ag_module):
+    coordinator.modules = {ag_module.id: ag_module}
+    coordinator.async_command_stop_ag_station = AsyncMock()
+    coordinator.async_command_stop = AsyncMock()
+    valve = SolemStationValve(coordinator, ag_module, STATION_2)
+
+    await valve.async_close_valve()
+
+    coordinator.async_command_stop_ag_station.assert_awaited_once_with(
+        ag_module, STATION_2
+    )
+    coordinator.async_command_stop.assert_not_called()
