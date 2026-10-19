@@ -42,6 +42,11 @@ MAX_RAIN_DELAY_DAYS = 30
 # of modules, so it is read as permanent here too rather than as 255 days.
 WATERING_STATES_OFF = (0, "OFF")
 RAIN_DELAY_PERMANENT = 255
+# After an ON/OFF command the cloud keeps reporting the OLD status until the
+# controller acks over LoRa (measured live on LR-IP modules: 60-130 s, so the
+# 60 s reconcile poll lands before it). Until a fresh poll agrees with the
+# command, or this grace runs out, the commanded status wins.
+ENABLE_ACK_GRACE = timedelta(minutes=10)
 
 # Command vocabulary for POST /module/sendManualModuleCommand
 CMD_STOP = "manualStop"

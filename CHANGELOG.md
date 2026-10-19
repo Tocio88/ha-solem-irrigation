@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The *Irrigation enabled* switch and the *Rain delay* number no longer
+  flip back right after a change.** Since 0.9.0 both show what the controller
+  reports, but the controller only acks an ON/OFF command over LoRa 60-130 s
+  later (measured on LR-IP modules), while the reconcile poll runs after 60 s:
+  that poll still read the old status, so every toggle bounced back until the
+  next regular poll, up to five minutes later. The commanded status now holds
+  until a poll made after the command confirms it, or for ten minutes at most,
+  after which the cloud's status is shown as is. Controllers that report no
+  status are unchanged.
+
 ## [0.9.0] - 2026-10-11
 
 ### Added
