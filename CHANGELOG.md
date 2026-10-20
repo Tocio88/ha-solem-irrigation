@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   until a poll made after the command confirms it, or for ten minutes at most,
   after which the cloud's status is shown as is. Controllers that report no
   status are unchanged.
+- **Setup no longer fails while every controller is unreachable**, e.g. with
+  the gateways and controllers powered down for the winter. A LoRa module
+  whose gateway is off answers like a Bluetooth-only one, so no state poll
+  came back and setup retried forever, with no entities at all. Entities now
+  show the last status the cloud stored for each module, as MySOLEM does, until
+  the controller reports again.
 
 ## [0.9.0] - 2026-10-11
 

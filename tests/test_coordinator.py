@@ -512,6 +512,103 @@ async def test_update_data_total_failure_raises(coordinator):
         await coordinator._async_update_data()
 
 
+def _stored(**watering) -> dict:
+    """A controller record's stored ``status``, shaped like the live reply's."""
+    return {
+        "dialogTimeStamp": "2026-09-14T06:00:00.000Z",
+        "relayIsLongPolling": False,
+        "watering": {"origin": 0, "runningProgram": 0, "time": "00:00", **watering},
+        "radio": [],
+    }
+
+
+async def test_update_data_falls_back_to_the_status_stored_on_the_record(
+    coordinator,
+):
+    """Every gateway powered down for the winter: every poll answers 503.
+
+    The first refresh has no previous reading to keep, so it used to fail and
+    setup never completed. The cloud still holds each module's last status.
+    """
+    coordinator.modules = {
+        "m1": _module(
+            id="m1",
+            raw={
+                "typeIsWatering": True,
+                "isOnline": False,
+                "relay": "g1",
+                "status": _stored(state=0, rainDelay=3, runningStation=1),
+            },
+        ),
+        "g1": _module(id="g1", raw={"status": None}),
+    }
+    coordinator.client.async_get_module_state = AsyncMock(
+        side_effect=SolemConnectionError("503 Service Unavailable")
+    )
+    coordinator.data = await coordinator._async_update_data()
+
+    assert coordinator.watering_enabled("m1") is False
+    assert coordinator.rain_delay_days("m1") == 3
+    assert coordinator.running_station_index("m1") == 1
+    assert coordinator.module_state("m1")["relay"] == "g1"
+    assert coordinator.module_state("g1") == {}
+    assert coordinator.relevant_module_ids() == {"m1", "g1"}
+
+
+async def test_a_stored_status_never_acks_an_on_off_command(coordinator):
+    """Only a status polled after the command counts, never the stored one."""
+    module = _module(raw={"typeIsWatering": True, "status": _stored(state=1)})
+    coordinator.modules = {"m1": module}
+    coordinator.data = _watering(state=1, rainDelay=0, runningStation=0)
+    coordinator.client.async_set_status = AsyncMock()
+    coordinator.async_schedule_refresh = MagicMock()
+    await coordinator.async_command_set_status(module, enabled=False)
+    module.raw["status"] = _stored(state=0, rainDelay=0)
+    # A poll fails with nothing cached for the module: the record's status,
+    # though it agrees with the command, is no ack.
+    coordinator.data = {}
+    coordinator.client.async_get_module_state = AsyncMock(
+        side_effect=SolemConnectionError("503")
+    )
+    coordinator.data = await coordinator._async_update_data()
+    assert coordinator.watering_enabled("m1") is False
+    assert "m1" in coordinator._status_pending
+
+
+async def test_update_data_still_fails_without_any_stored_status(coordinator):
+    coordinator.modules = {"m1": _module(id="m1", raw={"status": None})}
+    coordinator.client.async_get_module_state = AsyncMock(
+        side_effect=SolemConnectionError("503")
+    )
+    with pytest.raises(UpdateFailed):
+        await coordinator._async_update_data()
+
+
+async def test_a_live_reading_replaces_the_stored_status(coordinator):
+    coordinator.modules = {
+        "m1": _module(raw={"typeIsWatering": True, "status": _stored(state=0)})
+    }
+    coordinator.client.async_get_module_state = AsyncMock(
+        side_effect=SolemConnectionError("503")
+    )
+    coordinator.data = await coordinator._async_update_data()
+    assert coordinator.watering_enabled("m1") is False
+
+    # The gateway is back on: the live state wins...
+    coordinator.client.async_get_module_state = AsyncMock(
+        return_value={"status": {"watering": {"state": 1, "runningStation": 0}}}
+    )
+    coordinator.data = await coordinator._async_update_data()
+    assert coordinator.watering_enabled("m1") is True
+
+    # ...and is the reading kept when it goes off again.
+    coordinator.client.async_get_module_state = AsyncMock(
+        side_effect=SolemConnectionError("503")
+    )
+    coordinator.data = await coordinator._async_update_data()
+    assert coordinator.watering_enabled("m1") is True
+
+
 # -- command helpers ----------------------------------------------------------
 
 
@@ -1668,3 +1765,19 @@ async def test_ag_command_set_status_ignores_a_poll_started_before_it(coordinato
     coordinator.client.async_get_module_state = AsyncMock(side_effect=state)
     coordinator.data = await coordinator._async_update_data()
     assert coordinator._status_pending["ag1"][:2] == (True, 0)
+
+
+async def test_update_data_falls_back_to_an_ag_record_status(coordinator):
+    module = _ag_module(
+        raw={
+            **AG_FLAGS,
+            "status": _ag_state(_ag_output(0, rain_delay=255))["status"],
+        }
+    )
+    coordinator.modules = {"ag1": module}
+    coordinator.client.async_get_module_state = AsyncMock(
+        side_effect=SolemConnectionError("503")
+    )
+    coordinator.data = await coordinator._async_update_data()
+    assert coordinator.watering_enabled("ag1") is False
+    assert coordinator.rain_delay_days("ag1") == 0
