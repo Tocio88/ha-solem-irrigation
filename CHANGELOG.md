@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0b3] - 2026-10-20
+
+Third beta of 0.10.0, so that setup completes while the whole fleet is powered
+down for the winter
+([#18](https://github.com/antitoine/ha-solem-irrigation/pull/18)), on top of
+`0.10.0b2`. Thanks to [@Tocio88](https://github.com/Tocio88) for the fix. To
+install it, enable **Show beta versions** in HACS.
+
 ### Fixed
 
 - **Setup no longer fails while every controller is unreachable**, e.g. with
@@ -14,7 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose gateway is off answers like a Bluetooth-only one, so no state poll
   came back and setup retried forever, with no entities at all. Entities now
   show the last status the cloud stored for each module, as MySOLEM does, until
-  the controller reports again.
+  the controller reports again. That stored status carries no rain delay, so a
+  controller that was rain-delayed when it went offline reads as OFF until
+  then. ([#18](https://github.com/antitoine/ha-solem-irrigation/pull/18))
 
 ## [0.10.0b2] - 2026-10-19
 
@@ -426,7 +436,8 @@ instead of ~11 per-station/per-program controls.
 - Optimistic state updates with a delayed reconcile to cope with LoRa latency.
 - English and French translations.
 
-[Unreleased]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.10.0b2...HEAD
+[Unreleased]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.10.0b3...HEAD
+[0.10.0b3]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.10.0b2...v0.10.0b3
 [0.10.0b2]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.10.0b1...v0.10.0b2
 [0.10.0b1]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.9.0...v0.10.0b1
 [0.9.0]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.8.1...v0.9.0
