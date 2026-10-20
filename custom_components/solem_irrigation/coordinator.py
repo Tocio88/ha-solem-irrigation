@@ -446,6 +446,25 @@ class SolemModule:
         return next((p for p in self.programs if p.index == station.index - 1), None)
 
 
+def _record_state(module: SolemModule) -> dict[str, Any]:
+    """The live state the cloud last stored on ``module``'s record, or ``{}``.
+
+    A LoRa module whose gateway is off answers 503 on the state endpoint, like
+    a Bluetooth-only one, yet the module page still carries its last status,
+    shaped like the endpoint's reply -- what MySOLEM's web app shows for an
+    unreachable module. Its ``relay`` comes along, as it does in the reply,
+    so the module stays linked to its gateway. A gateway's record has no
+    status.
+    """
+    status = module.raw.get("status")
+    if not isinstance(status, dict) or not status:
+        return {}
+    state: dict[str, Any] = {"status": status}
+    if relay := module.raw.get("relay"):
+        state["relay"] = relay
+    return state
+
+
 def _name_stations_after_programs(module: SolemModule) -> None:
     """Name each LR-AG station after its program, as the web app labels it.
 
@@ -682,8 +701,14 @@ class SolemDataUpdateCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]
             except SolemConnectionError as err:
                 _LOGGER.debug("State poll failed for %s: %s", module_id, err)
                 last_error = err
-                # Keep the previous reading for this module, if any.
-                states[module_id] = self.module_state(module_id)
+                # Keep the previous reading for this module or, before the
+                # first one, the status the cloud stored on its record: with
+                # every gateway powered down (off-season) no poll ever comes
+                # back, and setup would otherwise never complete. Neither is
+                # in ``fetched``, so neither can ack an ON/OFF command.
+                states[module_id] = self.module_state(module_id) or _record_state(
+                    module
+                )
         # Only treat the cycle as failed if nothing at all came back.
         if last_error is not None and not any(states.values()):
             raise UpdateFailed(str(last_error))

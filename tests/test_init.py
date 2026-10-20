@@ -506,6 +506,58 @@ async def test_the_enable_switch_shows_an_off_set_outside_home_assistant(
     assert rain_delay.state == "1.0"
 
 
+async def test_a_powered_down_fleet_loads_with_its_stored_status(
+    hass: HomeAssistant, entry
+) -> None:
+    """Off-season, every gateway off: every state poll answers 503.
+
+    Setup used to retry forever. The module records still carry the status the
+    cloud last stored, as MySOLEM shows it.
+    """
+    controller = {
+        **CONTROLLER,
+        "isOnline": False,
+        "relay": "g1",
+        "status": {
+            "watering": {"state": 0, "rainDelay": 2, "runningStation": 1},
+            "radio": [],
+        },
+    }
+    pages = {"m1": (controller, []), "g1": ({**GATEWAY, "status": None}, [])}
+    state = AsyncMock(side_effect=SolemConnectionError("503 Service Unavailable"))
+
+    with (
+        patch(_LOGIN, AsyncMock(return_value="uid")),
+        patch(_IDS, AsyncMock(return_value=["m1", "g1"])),
+        patch(_GET, AsyncMock(side_effect=lambda module_id: pages[module_id])),
+        patch(_STATE, state),
+        patch(_FIELDS, AsyncMock(return_value={})),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert state.await_count == 2
+    entities = er.async_get(hass)
+
+    def entity_state(domain: str, unique_id: str) -> str:
+        entity_id = entities.async_get_entity_id(domain, DOMAIN, unique_id)
+        return hass.states.get(entity_id).state
+
+    assert entity_state("switch", "m1_enabled") == "off"
+    assert entity_state("number", "m1_rain_delay") == "2.0"
+    assert entity_state("sensor", "m1_running_station") == "Z1"
+    devices = dr.async_get(hass)
+    controller_device = devices.async_get_device_by_identifier(
+        (DOMAIN, "m1"), entry.entry_id
+    )
+    gateway_device = devices.async_get_device_by_identifier(
+        (DOMAIN, "g1"), entry.entry_id
+    )
+    assert gateway_device is not None
+    assert controller_device.via_device_id == gateway_device.id
+
+
 async def test_only_a_device_that_left_the_account_can_be_removed(
     hass: HomeAssistant, entry
 ) -> None:
