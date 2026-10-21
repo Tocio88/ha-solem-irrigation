@@ -44,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   came back and setup retried forever, with no entities at all. Entities now
   show the last status the cloud stored for each module, as MySOLEM does, until
   the controller reports again.
+- The live tests (`pytest -m integration`) run again: the test plugin's resolver
+  refused the allowed host names before any of them could start.
 
 ## [0.9.0] - 2026-10-11
 
