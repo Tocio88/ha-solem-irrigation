@@ -7,12 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-22
+
+Adds turbine flow meters and agricultural LR-AG modules, holds ON/OFF changes
+until the controller confirms them, and keeps a powered-down fleet set up over
+the winter. Thanks to [@Tocio88](https://github.com/Tocio88) for the LR-AG
+support, the ON/OFF hold and the offline fix.
+
 ### Added
 
+- **Turbine flow meters.** The turbine on an LR-IP-ECO (débitmètre turbine,
+  SOLEM input type 33) now gets two sensors on its controller: *&lt;turbine&gt;
+  flow rate*, in L/min, and *&lt;turbine&gt; water used today*, the litres
+  through it since local midnight, ready for the **Water** dashboard. A turbine
+  keeps no running total the way a classic flow meter does: it reports the
+  flow once a minute while water runs, and MySOLEM's own charts add those
+  readings up. The integration does the same, re-adding the day on every poll,
+  so a restart neither loses nor double-counts anything. Checked against the
+  #12 reporter's run: 46.45 L for MySOLEM's 46.5 L.
+  ([#12](https://github.com/antitoine/ha-solem-irrigation/issues/12))
 - **Agricultural LR-AG modules are now supported.** SOLEM flags them as
   agricultural rather than as watering devices, so they used to be skipped;
   they now get the same entities as any controller.
-  ([#5](https://github.com/antitoine/ha-solem-irrigation/issues/5)) An LR-AG
+  ([#5](https://github.com/antitoine/ha-solem-irrigation/issues/5),
+  [#17](https://github.com/antitoine/ha-solem-irrigation/pull/17)) An LR-AG
   differs in a few ways, as measured on one over a season:
   - Several stations can water at once, so several valves can be open
     together, *Watering station* lists every running station (and their
@@ -34,16 +52,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports, but the controller only acks an ON/OFF command over LoRa 60-130 s
   later (measured on LR-IP modules), while the reconcile poll runs after 60 s:
   that poll still read the old status, so every toggle bounced back until the
-  next regular poll, up to five minutes later. The commanded status now holds
-  until a poll made after the command confirms it, or for ten minutes at most,
-  after which the cloud's status is shown as is. Controllers that report no
-  status are unchanged.
+  next regular poll, up to five minutes later. The commanded status (including a
+  new rain delay set on an already-OFF controller) now holds until a poll made
+  after the command confirms it, or for ten minutes at most, after which the
+  cloud's status is shown as is. Controllers that report no status are
+  unchanged. ([#16](https://github.com/antitoine/ha-solem-irrigation/pull/16))
 - **Setup no longer fails while every controller is unreachable**, e.g. with
   the gateways and controllers powered down for the winter. A LoRa module
   whose gateway is off answers like a Bluetooth-only one, so no state poll
   came back and setup retried forever, with no entities at all. Entities now
   show the last status the cloud stored for each module, as MySOLEM does, until
-  the controller reports again.
+  the controller reports again. That stored status carries no rain delay, so a
+  controller that was rain-delayed when it went offline reads as OFF until
+  then. ([#18](https://github.com/antitoine/ha-solem-irrigation/pull/18))
 
 ## [0.9.0] - 2026-10-11
 
@@ -389,7 +410,8 @@ instead of ~11 per-station/per-program controls.
 - Optimistic state updates with a delayed reconcile to cope with LoRa latency.
 - English and French translations.
 
-[Unreleased]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.7.0...v0.8.0
