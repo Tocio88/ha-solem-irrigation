@@ -23,10 +23,11 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
+      # uv installs the exact version pinned in .python-version, whatever the
+      # runner image: setup-python only ships prebuilt versions per Ubuntu
+      # release, and ubuntu-26.04 has no 3.14.2.
       - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version-file: ".python-version"
+        run: uv python install
 
       - name: Install dependencies
         run: uv sync --all-extras --all-groups --frozen
