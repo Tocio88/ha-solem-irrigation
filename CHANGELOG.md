@@ -7,39 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.10.0b3] - 2026-10-20
+## [0.10.0] - 2026-10-22
 
-Third beta of 0.10.0, so that setup completes while the whole fleet is powered
-down for the winter
-([#18](https://github.com/antitoine/ha-solem-irrigation/pull/18)), on top of
-`0.10.0b2`. Thanks to [@Tocio88](https://github.com/Tocio88) for the fix. To
-install it, enable **Show beta versions** in HACS.
-
-### Fixed
-
-- **Setup no longer fails while every controller is unreachable**, e.g. with
-  the gateways and controllers powered down for the winter. A LoRa module
-  whose gateway is off answers like a Bluetooth-only one, so no state poll
-  came back and setup retried forever, with no entities at all. Entities now
-  show the last status the cloud stored for each module, as MySOLEM does, until
-  the controller reports again. That stored status carries no rain delay, so a
-  controller that was rain-delayed when it went offline reads as OFF until
-  then. ([#18](https://github.com/antitoine/ha-solem-irrigation/pull/18))
-
-## [0.10.0b2] - 2026-10-19
-
-Second beta of 0.10.0, adding agricultural LR-AG modules
-([#5](https://github.com/antitoine/ha-solem-irrigation/issues/5),
-[#17](https://github.com/antitoine/ha-solem-irrigation/pull/17)) and holding
-ON/OFF commands until the controller confirms them over LoRa
-([#16](https://github.com/antitoine/ha-solem-irrigation/pull/16)), on top of
-`0.10.0b1`'s turbine flow meters
-([#12](https://github.com/antitoine/ha-solem-irrigation/issues/12)). Thanks to
-[@Tocio88](https://github.com/Tocio88) for both contributions. To install it,
-enable **Show beta versions** in HACS.
+Adds turbine flow meters and agricultural LR-AG modules, holds ON/OFF changes
+until the controller confirms them, and keeps a powered-down fleet set up over
+the winter. Thanks to [@Tocio88](https://github.com/Tocio88) for the LR-AG
+support, the ON/OFF hold and the offline fix.
 
 ### Added
 
+- **Turbine flow meters.** The turbine on an LR-IP-ECO (débitmètre turbine,
+  SOLEM input type 33) now gets two sensors on its controller: *&lt;turbine&gt;
+  flow rate*, in L/min, and *&lt;turbine&gt; water used today*, the litres
+  through it since local midnight, ready for the **Water** dashboard. A turbine
+  keeps no running total the way a classic flow meter does: it reports the
+  flow once a minute while water runs, and MySOLEM's own charts add those
+  readings up. The integration does the same, re-adding the day on every poll,
+  so a restart neither loses nor double-counts anything. Checked against the
+  #12 reporter's run: 46.45 L for MySOLEM's 46.5 L.
+  ([#12](https://github.com/antitoine/ha-solem-irrigation/issues/12))
 - **Agricultural LR-AG modules are now supported.** SOLEM flags them as
   agricultural rather than as watering devices, so they used to be skipped;
   they now get the same entities as any controller.
@@ -71,26 +57,14 @@ enable **Show beta versions** in HACS.
   after the command confirms it, or for ten minutes at most, after which the
   cloud's status is shown as is. Controllers that report no status are
   unchanged. ([#16](https://github.com/antitoine/ha-solem-irrigation/pull/16))
-
-## [0.10.0b1] - 2026-10-11
-
-First beta of 0.10.0, for the LR-IP-ECO's turbine flow meter in
-[#12](https://github.com/antitoine/ha-solem-irrigation/issues/12). It is built
-from a real watering run but has not yet run on a real turbine. To install it,
-enable **Show beta versions** in HACS.
-
-### Added
-
-- **Turbine flow meters.** The turbine on an LR-IP-ECO (débitmètre turbine,
-  SOLEM input type 33) now gets two sensors on its controller: *&lt;turbine&gt;
-  flow rate*, in L/min, and *&lt;turbine&gt; water used today*, the litres
-  through it since local midnight, ready for the **Water** dashboard. A turbine
-  keeps no running total the way a classic flow meter does: it reports the
-  flow once a minute while water runs, and MySOLEM's own charts add those
-  readings up. The integration does the same, re-adding the day on every poll,
-  so a restart neither loses nor double-counts anything. Checked against the
-  #12 reporter's run: 46.45 L for MySOLEM's 46.5 L.
-  ([#12](https://github.com/antitoine/ha-solem-irrigation/issues/12))
+- **Setup no longer fails while every controller is unreachable**, e.g. with
+  the gateways and controllers powered down for the winter. A LoRa module
+  whose gateway is off answers like a Bluetooth-only one, so no state poll
+  came back and setup retried forever, with no entities at all. Entities now
+  show the last status the cloud stored for each module, as MySOLEM does, until
+  the controller reports again. That stored status carries no rain delay, so a
+  controller that was rain-delayed when it went offline reads as OFF until
+  then. ([#18](https://github.com/antitoine/ha-solem-irrigation/pull/18))
 
 ## [0.9.0] - 2026-10-11
 
@@ -436,10 +410,8 @@ instead of ~11 per-station/per-program controls.
 - Optimistic state updates with a delayed reconcile to cope with LoRa latency.
 - English and French translations.
 
-[Unreleased]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.10.0b3...HEAD
-[0.10.0b3]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.10.0b2...v0.10.0b3
-[0.10.0b2]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.10.0b1...v0.10.0b2
-[0.10.0b1]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.9.0...v0.10.0b1
+[Unreleased]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/antitoine/ha-solem-irrigation/compare/v0.7.0...v0.8.0
