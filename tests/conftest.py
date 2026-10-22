@@ -1,6 +1,7 @@
 """Shared pytest fixtures for the SOLEM irrigation tests."""
 
 import pathlib
+import socket
 
 import aioresponses.core
 import pytest
@@ -57,6 +58,13 @@ except ImportError:  # pragma: no cover - pytest-socket always present via PHCC
         """No-op when pytest-socket is unavailable."""
 
 
+# The real resolver, captured before pytest-homeassistant-custom-component
+# replaces it with one that refuses every host name ("DNS resolution disabled
+# in tests"). ``socket_allow_hosts`` below resolves the allowed names through
+# it, so the live tests could not even start.
+_REAL_GETADDRINFO = socket.getaddrinfo
+
+
 @pytest.fixture(autouse=True)
 def auto_enable_custom_integrations(enable_custom_integrations):
     """Enable loading of the custom integration in every test."""
@@ -67,6 +75,7 @@ def auto_enable_custom_integrations(enable_custom_integrations):
 def allow_socket_fixture(request):
     """Allow real sockets only for tests explicitly marked ``integration``."""
     if request.node.get_closest_marker("integration"):
+        socket.getaddrinfo = _REAL_GETADDRINFO
         enable_socket()
         socket_allow_hosts(
             ["127.0.0.1", "localhost", "::1", "mysolem.com", "us.mysolem.com"],

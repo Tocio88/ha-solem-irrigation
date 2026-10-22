@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The live tests (`pytest -m integration`) run again: the test plugin's resolver
+  refused the allowed host names before any of them could start.
+
 ## [0.10.0] - 2026-10-22
 
 Adds turbine flow meters and agricultural LR-AG modules, holds ON/OFF changes
